@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env.local
+.DS_Store
+*.sqlite
+whatsapp_emovur.db
