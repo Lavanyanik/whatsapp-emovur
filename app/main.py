@@ -14,7 +14,7 @@ from .routes.messages import router as messages_router
 from .routes.templates import router as templates_router
 from .utils.logger import get_logger
 
-from .services.template_service import refresh_templates_if_needed, TemplateLookupError
+from .services.template_service import refresh_templates_if_needed
 
 from .services.emovur_exceptions import (
     EmovurAuthError,
@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     validate_settings(settings)
     await init_db()
 
-    # Pre-warm template cache so /messages and scheduler have approved templates ready.
+    # Pre-warm template cache so /messages has approved templates ready.
     try:
         templates = await refresh_templates_if_needed(force=True)
         approved = [t for t in templates if str(t.status).lower() == "approved"]
@@ -51,10 +51,8 @@ async def lifespan(app: FastAPI):
         )
         for t in approved:
             logger.info("Approved template: name=%s language=%s", t.name, t.language)
-    except TemplateLookupError as exc:
-        logger.warning("Template cache warm-up failed: %s", exc)
     except Exception:
-        logger.exception("Template cache warm-up unexpected error")
+        logger.warning("Template cache warm-up unavailable; continuing without cached templates")
 
 
 

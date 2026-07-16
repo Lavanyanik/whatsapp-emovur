@@ -1,154 +1,145 @@
 import hashlib
 import hmac
-from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
-from app.routes.webhook import receive_webhook
-from app.services.webhook_service import process_event
-from app.providers.factory import get_provider
+from app.config import Settings
 from app.providers.emovur_provider import EmovurProvider
-from app.providers.base import BaseCloudApiProvider
+from app.providers.factory import ProviderFactory
+from app.providers.meta_provider import MetaProvider
+from app.routes.messages import require_messages_auth
+from app.routes.webhook import _verify_signature
+from app.services.webhook_service import parse_whatsapp_webhook_payload, process_event
 
 
-@pytest.fixture()
-def anyio_backend():
-    return "asyncio"
+class FakeDB:
+    def __init__(self):
+        self.processed = set()
+        self.added = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def execute(self, *_args, **_kwargs):
+        db = self
+
+        class Result:
+            def scalar_one_or_none(self):
+                return object() if db.processed else None
+
+        return Result()
+
+    def add(self, row):
+        self.added.append(row)
+
+    async def flush(self):
+        return None
+
+    async def commit(self):
+        self.commits += 1
+        self.processed.update(row.message_id for row in self.added)
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+
+def test_provider_factory_uses_meta_without_aggregator():
+    settings = type("Settings", (), {"whatsapp_provider": None})()
+    assert isinstance(ProviderFactory.create(settings), MetaProvider)
+
+
+def test_provider_factory_uses_emovur_when_configured():
+    settings = type("Settings", (), {"whatsapp_provider": "emovur"})()
+    assert isinstance(ProviderFactory.create(settings), EmovurProvider)
+
+
+def test_signature_verification_and_default_are_enabled():
+    body = b"payload"
+    secret = "secret"
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    assert _verify_signature(signature, secret, body)
+    assert Settings.model_fields["enable_webhook_signature_verification"].default is True
+
+
+def test_messages_auth_requires_a_matching_token(monkeypatch):
+    from app.routes import messages
+
+    monkeypatch.setattr(
+        messages,
+        "get_settings",
+        lambda: type("Settings", (), {"messages_auth_token": "token", "api_key": "fallback"})(),
+    )
+    request = Request({"type": "http", "headers": [(b"x-api-key", b"token")]})
+    require_messages_auth(request)
+
+    with pytest.raises(Exception) as exc_info:
+        require_messages_auth(Request({"type": "http", "headers": []}))
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_webhook_parsing_normalizes_button_reply():
+async def test_callback_runs_before_idempotency_record_is_added():
+    db = FakeDB()
+    observed = []
+
+    async def on_reply(event):
+        observed.append((event, list(db.added)))
+
     payload = {
-        "entry": [
+        "messages": [
             {
-                "changes": [
-                    {
-                        "value": {
-                            "contacts": [{"wa_id": "15551234567"}],
-                            "messages": [
-                                {
-                                    "id": "msg-1",
-                                    "from": "15551234567",
-                                    "timestamp": "1710000000",
-                                    "type": "interactive",
-                                    "interactive": {"button_reply": {"id": "btn-1", "title": "Interested"}},
-                                }
-                            ],
-                        }
-                    }
-                ]
+                "id": "message-1",
+                "from": "15551234567",
+                "type": "button",
+                "button": {"payload": "Not Interested", "text": "Not Interested"},
             }
         ]
     }
+    result = await process_event(payload=payload, db=db, on_reply=on_reply)
 
-    events = __import__("app.services.webhook_service", fromlist=["parse_whatsapp_webhook_payload"]).parse_whatsapp_webhook_payload(payload)
-    assert events
-    assert events[0]["message_type"] == "interactive"
-    assert events[0]["button_payload"] == "btn-1"
-    assert events[0]["phone"] == "+15551234567"
-
-
-@pytest.mark.asyncio
-async def test_idempotency_ordering_commit_after_success(monkeypatch):
-    from app.services.webhook_service import _idempotency_check_or_insert
-    from app.models import WebhookEvent
-
-    class DummyDB:
-        def __init__(self):
-            self.commits = 0
-            self.rollbacks = 0
-            self.added = []
-        async def execute(self, *args, **kwargs):
-            class Result:
-                def scalar_one_or_none(self):
-                    return None
-            return Result()
-        async def flush(self):
-            return None
-        async def commit(self):
-            self.commits += 1
-        async def rollback(self):
-            self.rollbacks += 1
-        def add(self, row):
-            self.added.append(row)
-
-    db = DummyDB()
-    inserted = await _idempotency_check_or_insert(db, message_id="msg-1", payload_hash="hash")
-    assert inserted[0] is False
-    assert db.commits == 0
-
-
-def test_provider_factory_defaults_to_meta_provider(monkeypatch):
-    monkeypatch.setattr("app.config.get_settings", lambda: type("S", (), {"whatsapp_provider": None})())
-    provider = get_provider()
-    assert isinstance(provider, EmovurProvider)
+    assert result["results"][0]["status"] == "ok"
+    assert observed[0][0]["reply_key"] == "not_interested"
+    assert observed[0][1] == []
+    assert db.commits == 1
 
 
 @pytest.mark.asyncio
-async def test_provider_send_text_uses_provider(monkeypatch):
-    class FakeProvider(BaseCloudApiProvider):
-        async def send_text(self, *, to: str, text: str, timeout: int = 10):
-            return {"status_code": 200, "body": {"ok": True}}
+async def test_failed_callback_does_not_mark_event_processed():
+    db = FakeDB()
 
-        async def send_template(self, *args, **kwargs):
-            raise NotImplementedError
+    async def on_reply(_event):
+        raise RuntimeError("callback failed")
 
-        async def send_media(self, *args, **kwargs):
-            raise NotImplementedError
+    payload = {"messages": [{"id": "message-2", "from": "15551234567", "type": "button", "button": {}}]}
+    result = await process_event(payload=payload, db=db, on_reply=on_reply)
 
-        async def send_interactive(self, *args, **kwargs):
-            raise NotImplementedError
-
-    monkeypatch.setattr("app.providers.factory.get_settings", lambda: type("S", (), {"whatsapp_provider": "emovur"})())
-    monkeypatch.setattr("app.providers.factory.EmovurProvider", lambda: FakeProvider())
-    provider = get_provider()
-    assert provider.send_text(to="+1555", text="hi")
+    assert result["status"] == "fatal_error"
+    assert db.added == []
+    assert db.rollbacks == 1
 
 
-def test_signature_verification_works():
-    body = b"payload"
-    secret = "secret"
-    signature = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    from app.routes.webhook import _verify_signature
-
-    assert _verify_signature(signature, secret, body) is True
-
-
-def test_auth_guard_is_present():
-    from app.routes.messages import send_message_route
-
-    assert send_message_route is not None
+def test_webhook_parser_normalizes_interactive_reply():
+    payload = {
+        "entry": [{"changes": [{"value": {"contacts": [{"wa_id": "15551234567"}], "messages": [{"id": "msg-1", "from": "15551234567", "timestamp": "1710000000", "type": "interactive", "interactive": {"button_reply": {"id": "btn-1", "title": "Interested"}}}]}}]}]
+    }
+    event = parse_whatsapp_webhook_payload(payload)[0]
+    assert event["button_payload"] == "btn-1"
+    assert event["phone"] == "+15551234567"
 
 
-@pytest.mark.asyncio
-async def test_callback_invocation(monkeypatch):
-    calls = []
+def test_fastapi_app_starts(monkeypatch):
+    from app import main
 
-    async def fake_on_reply(event):
-        calls.append(event["message_id"])
+    async def no_op_init_db():
+        return None
 
-    from app.services.webhook_service import process_event
+    async def no_op_templates(*_args, **_kwargs):
+        return []
 
-    class DummyDB:
-        async def execute(self, *args, **kwargs):
-            class Result:
-                def scalar_one_or_none(self):
-                    return None
-            return Result()
-        async def flush(self):
-            return None
-        async def commit(self):
-            return None
-        async def rollback(self):
-            return None
-        def add(self, row):
-            return None
+    monkeypatch.setattr(main, "validate_settings", lambda _settings: None)
+    monkeypatch.setattr(main, "init_db", no_op_init_db)
+    monkeypatch.setattr(main, "refresh_templates_if_needed", no_op_templates)
 
-    monkeypatch.setattr("app.services.webhook_service.dispatch", lambda **kwargs: ({"status": "ok"},))
-    monkeypatch.setattr("app.services.webhook_service.get_settings", lambda: type("S", (), {"callback": None})())
-
-    # Placeholder assertion to ensure the callback path can be wired.
-    assert True
+    with TestClient(main.app) as client:
+        assert client.get("/health").status_code == 200

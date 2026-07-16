@@ -9,14 +9,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from ..config import get_settings
 from ..database import AsyncSessionLocal
-from ..services.webhook_service import process_event, parse_whatsapp_webhook_payload
+from ..services.webhook_service import process_event
 from ..utils.logger import get_logger
 
 
 logger = get_logger(__name__)
 
 router = APIRouter()
-settings = get_settings()
 
 
 def _compute_signature(secret: str, body: bytes) -> str:
@@ -31,16 +30,6 @@ def _verify_signature(signature_header: Optional[str], secret: str, body: bytes)
     return hmac.compare_digest(signature_header, expected)
 
 
-def _redact_headers(headers: Dict[str, str]) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for k, v in headers.items():
-        if k.lower() in {"api-key", "authorization", "x-hub-signature-256"}:
-            out[k] = "<redacted>"
-        else:
-            out[k] = v
-    return out
-
-
 def _parse_json_body(raw_body: bytes) -> Optional[Dict[str, Any]]:
     if not raw_body:
         return None
@@ -53,39 +42,13 @@ def _parse_json_body(raw_body: bytes) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_log_fields(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    phone = None
-    message_type = None
-    button_id = None
-    button_title = None
-
-    if isinstance(payload, dict):
-        try:
-            events = parse_whatsapp_webhook_payload(payload)
-            if events:
-                first_event = events[0]
-                phone = first_event.get("phone")
-                message_type = first_event.get("message_type")
-                button_id = first_event.get("button_id")
-                button_title = first_event.get("button_title")
-        except Exception:
-            logger.exception("Failed to extract webhook log fields")
-
-    return {
-        "phone": phone,
-        "message_type": message_type,
-        "button_id": button_id,
-        "button_title": button_title,
-    }
-
-
 @router.get("/webhook", tags=["webhook"], summary="Webhook verification")
 async def verify_webhook(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
 ):
-    expected = settings.verify_token
+    expected = get_settings().verify_token
     if expected is None:
         logger.error("VERIFY_TOKEN not configured")
         raise HTTPException(status_code=500, detail="server_misconfigured")
@@ -115,10 +78,10 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
 
     Responsibilities:
       - receive webhook
-      - verify signature (optional)
+      - verify the Meta signature
       - parse/normalize payload (best-effort)
       - call webhook_service.process_event(...) (always awaited)
-      - log full payload + key extracted fields
+      - log request metadata and extracted fields
       - always return HTTP 200 on successful processing
     """
 
@@ -131,28 +94,11 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
         raw_body = b""
 
     payload = _parse_json_body(raw_body)
-    fields = _extract_log_fields(payload)
-
-    logger.info(
-        "webhook_hit request_id=%s message_type=%s phone=%s",
-        request_id,
-        fields.get("message_type"),
-        fields.get("phone"),
-    )
 
     try:
-        logger.info(
-            "routes/webhook: POST /webhook hit request_id=%s headers=%s",
-            request_id,
-            _redact_headers(dict(request.headers)),
-        )
-        logger.info(
-            "routes/webhook: POST /webhook raw_body_bytes=%s raw_body_preview=%s",
-            len(raw_body or b""),
-            (raw_body or b"")[:1500].decode("utf-8", errors="replace"),
-        )
-
+        logger.info("routes/webhook: POST /webhook hit request_id=%s", request_id)
         signature_header = request.headers.get("X-Hub-Signature-256")
+        settings = get_settings()
         if settings.enable_webhook_signature_verification:
             app_secret = settings.whatsapp_app_secret or getattr(settings, "api_key", None)
             if not app_secret:
@@ -173,16 +119,6 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
 
         if payload is None:
             raise HTTPException(status_code=400, detail="invalid_json")
-
-        extracted_fields: Dict[str, Any] = {}
-        try:
-            events_for_log = parse_whatsapp_webhook_payload(payload)
-            extracted_fields = {
-                "events_count": len(events_for_log),
-                "first_event": events_for_log[0] if events_for_log else None,
-            }
-        except Exception:
-            logger.exception("routes/webhook: parse_whatsapp_webhook_payload failed request_id=%s", request_id)
 
         async with AsyncSessionLocal() as db:
             try:

@@ -1,35 +1,29 @@
+"""Provider selection for outbound WhatsApp messages."""
+
 from __future__ import annotations
 
 from typing import Optional
 
-from ..config import get_settings
-from ..utils.logger import get_logger
-
+from ..config import Settings, get_settings
 from .emovur_provider import EmovurProvider
-from .base import BaseCloudApiProvider
-
-logger = get_logger(__name__)
-
-
-def get_provider() -> BaseCloudApiProvider:
-    """Return the outbound WhatsApp provider.
-
-    Environment variable selection is provider-agnostic and defaults to the
-    Meta-compatible provider when no explicit provider is configured.
-    """
-
-    settings = get_settings()
-    provider_name: Optional[str] = getattr(settings, "whatsapp_provider", None)
-
-    if provider_name and str(provider_name).lower() == "emovur":
-        return EmovurProvider()
-
-    return MetaCloudProvider()
+from .meta_provider import MetaProvider
+from .protocol import WhatsAppProvider
 
 
-class MetaCloudProvider(EmovurProvider):
-    """Fallback provider that preserves the existing outbound contract."""
+class ProviderFactory:
+    """Create the configured provider, defaulting to direct Meta Cloud API."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    @staticmethod
+    def create(settings: Optional[Settings] = None) -> WhatsAppProvider:
+        configured_settings = settings or get_settings()
+        provider_name = (getattr(configured_settings, "whatsapp_provider", None) or "").strip().lower()
+        if provider_name == "emovur":
+            return EmovurProvider()
+        return MetaProvider()
 
+
+def get_provider() -> WhatsAppProvider:
+    return ProviderFactory.create()
+
+
+MetaCloudProvider = MetaProvider

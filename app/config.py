@@ -4,7 +4,6 @@ Reads all values from .env at the project root (parent of the app package).
 """
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import logging
 
@@ -63,13 +62,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    def __repr_args__(self) -> "tuple[tuple[str, Any], ...]":
-        # Do not print API key in repr and avoid referencing removed fields.
+    def __repr_args__(self) -> "tuple[tuple[str, object], ...]":
+        """Return non-sensitive settings for Pydantic's representation."""
         return (
             ("emovur_api_url", getattr(self, "emovur_api_url", None)),
             ("phone_number_id", getattr(self, "phone_number_id", None)),
             ("waba_id", getattr(self, "waba_id", None)),
             ("whatsapp_provider", getattr(self, "whatsapp_provider", None)),
+            ("meta_api_url", getattr(self, "meta_api_url", None)),
+            ("enable_webhook_signature_verification", self.enable_webhook_signature_verification),
             ("log_level", getattr(self, "log_level", None)),
         )
 

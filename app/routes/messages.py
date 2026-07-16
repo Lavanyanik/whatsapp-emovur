@@ -1,3 +1,5 @@
+import hmac
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
@@ -19,11 +21,9 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
-settings = get_settings()
-
-
 def require_messages_auth(request: Request) -> None:
-    expected_token = getattr(settings, "messages_auth_token", None) or getattr(settings, "api_key", None)
+    settings = get_settings()
+    expected_token = settings.messages_auth_token or settings.api_key
     if not expected_token:
         raise HTTPException(status_code=500, detail="server_misconfigured")
 
@@ -33,7 +33,7 @@ def require_messages_auth(request: Request) -> None:
         if auth_header.startswith("Bearer "):
             provided = auth_header[len("Bearer "):].strip()
 
-    if provided != expected_token:
+    if not provided or not hmac.compare_digest(provided, expected_token):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -45,17 +45,10 @@ def require_messages_auth(request: Request) -> None:
     description="Generic capability-based endpoint for sending WhatsApp template, text, image, document, video, audio, and interactive messages via Emovur.",
 )
 async def send_message_route(payload: MessageRequest, _auth: None = Depends(require_messages_auth)):
-    logger.info("/messages route entered payload=%s", payload)
+    logger.info("Message send requested type=%s", payload.type)
 
     try:
         if payload.type == "template":
-            logger.info(
-                "Template send request to=%s template_name=%s language=%s components=%s",
-                payload.to,
-                payload.template_name,
-                payload.language,
-                payload.components,
-            )
             result = await send_template(
                 to=payload.to,
                 template_name=payload.template_name,
@@ -77,19 +70,19 @@ async def send_message_route(payload: MessageRequest, _auth: None = Depends(requ
         else:
             raise HTTPException(status_code=400, detail=f"unsupported message type: {payload.type}")
     except EmovurRequestError as exc:
-        logger.exception("Emovur request failed for to=%s: %s", payload.to, exc)
+        logger.exception("Emovur request failed")
         return JSONResponse(
             status_code=504,
             content={"detail": "emovur_request_timeout", "error": str(exc)},
         )
     except TemplateLookupError as exc:
-        logger.exception("Template lookup failed for to=%s template=%s: %s", payload.to, payload.template_name, exc)
+        logger.exception("Template lookup failed")
         return JSONResponse(
             status_code=404,
             content={"detail": "template_not_found", "error": str(exc)},
         )
     except EmovurError as exc:
-        logger.exception("Emovur API returned an error for to=%s: %s", payload.to, exc)
+        logger.exception("Emovur API returned an error")
         status_code = getattr(exc, "status_code", 502) or 502
         if status_code == 404:
             status_code = 502

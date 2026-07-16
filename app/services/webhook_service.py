@@ -15,16 +15,14 @@ and introduces the layered entrypoint:
 # The new layered code uses process_event for routing to handlers.
 
 import hashlib
-import hmac
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from ..config import get_settings
 from ..models import WebhookEvent
 from ..utils.logger import get_logger
 
@@ -41,21 +39,27 @@ class WebhookProcessResult:
     button_title: Optional[str] = None
     button_payload: Optional[str] = None
     button_id: Optional[str] = None
-    candidate_id: Optional[int] = None
     detail: Optional[str] = None
 
 
 # ------------------------- Normalization helpers (legacy) -------------------------
 
-RESPONSE_MAPPING: Dict[str, Tuple[str, str]] = {
-    "interested": ("interested", "Interested"),
-    "not interested": ("not_interested", "Not Interested"),
-    "not_interested": ("not_interested", "Not Interested"),
-    "not-interested": ("not_interested", "Not Interested"),
-    "opt out": ("opt_out", "Opt Out"),
-    "opt_out": ("opt_out", "Opt Out"),
-    "opt-out": ("opt_out", "Opt Out"),
-}
+OnReply = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+def _reply_key(button_title: Optional[str], button_payload: Optional[str]) -> Optional[str]:
+    """Normalize known button replies for consumers of ``on_reply``."""
+    for value in (button_payload, button_title):
+        if not isinstance(value, str):
+            continue
+        key = " ".join(value.strip().lower().replace("_", " ").replace("-", " ").split())
+        if key == "not interested":
+            return "not_interested"
+        if key == "interested":
+            return "interested"
+        if key == "opt out":
+            return "opt_out"
+    return None
 
 
 def _normalize_phone(phone: Optional[str]) -> str:
@@ -191,7 +195,7 @@ def _extract_events_interactive_button_reply(payload: Dict[str, Any]) -> List[Di
                     #   interactive: { button_reply: { id, title } }
                     button_reply_id = button_reply.get("id")
                     button_reply_title = button_reply.get("title")
-                    # Keep payload as id for mapping to candidate status.
+                    # Preserve the provider button ID as the callback payload.
                     button_payload = button_reply_id or button_reply.get("title")
 
                 if m_type != "interactive":
@@ -334,7 +338,7 @@ def _extract_events_whatsapp_text_message(payload: Dict[str, Any]) -> List[Dict[
                         "timestamp": ts,
                         "message_type": "message",
                         "text": body,
-                        # Treat these like button clicks so existing map_button_to_status works.
+                        # Preserve text as a reply value for callback consumers.
                         "button_title": body,
                         "button_payload": body,
                         "button_id": None,
@@ -352,8 +356,6 @@ def parse_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict[str, An
     diagnostics when no supported message events can be extracted.
     """
 
-    import json
-
     events: List[Dict[str, Any]] = []
 
     attempted_parsers: List[str] = []
@@ -368,7 +370,7 @@ def parse_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict[str, An
 
     if not isinstance(payload, dict):
         _record_failure("root", "payload is not a dict")
-        logger.warning("parse_whatsapp_webhook_payload: payload invalid type=%s", type(payload).__name__)
+        logger.warning("parse_whatsapp_webhook_payload: invalid input type=%s", type(payload).__name__)
         return []
 
     # Log if we only receive statuses and nothing else.
@@ -454,16 +456,11 @@ def parse_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict[str, An
     if only_statuses:
         try:
             logger.warning(
-                "parse_whatsapp_webhook_payload: upstream sent only statuses; no incoming message/button events were found. payload_keys=%s statuses_count=%s",
-                list(payload.keys()),
+                "parse_whatsapp_webhook_payload: upstream sent only statuses; no incoming message/button events were found statuses_count=%s",
                 len(payload.get("statuses") or []),
             )
-            logger.warning(
-                "parse_whatsapp_webhook_payload: full payload=%s",
-                json.dumps(payload, indent=2, ensure_ascii=False),
-            )
         except Exception:
-            logger.warning("parse_whatsapp_webhook_payload: failed to json-dumps payload")
+            logger.warning("parse_whatsapp_webhook_payload: status notification diagnostics failed")
 
     # Detailed logging showing why parsing produced zero events.
     missing_fields: List[str] = []
@@ -481,12 +478,8 @@ def parse_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict[str, An
             parser_failures,
             missing_fields,
         )
-        logger.warning(
-            "parse_whatsapp_webhook_payload: full payload=%s",
-            json.dumps(payload, indent=2, ensure_ascii=False),
-        )
     except Exception:
-        logger.warning("parse_whatsapp_webhook_payload: could not dump payload for diagnostics")
+        logger.warning("parse_whatsapp_webhook_payload: diagnostics failed")
 
     return []
 
@@ -494,63 +487,36 @@ def parse_whatsapp_webhook_payload(payload: Dict[str, Any]) -> List[Dict[str, An
 
 
 
-async def _idempotency_check_or_insert(
+async def _is_processed(db: AsyncSession, message_id: str) -> bool:
+    result = await db.execute(select(WebhookEvent).where(WebhookEvent.message_id == message_id))
+    return result.scalar_one_or_none() is not None
 
-    db: AsyncSession, *, message_id: str, payload_hash: str
-) -> Tuple[bool, Optional[WebhookEvent]]:
-    try:
-        res = await db.execute(select(WebhookEvent).where(WebhookEvent.message_id == message_id))
-        row = res.scalar_one_or_none()
-        if row is not None:
-            return True, row
-    except SQLAlchemyError:
-        raise
 
-    try:
-        row = WebhookEvent(message_id=message_id, payload_hash=payload_hash)
-        db.add(row)
-        await db.flush()
-        return False, row
-    except IntegrityError:
-        await db.rollback()
-        return True, None
+async def _record_processed(db: AsyncSession, *, message_id: str, payload_hash: str) -> None:
+    """Persist the deduplication record only after a callback succeeds."""
+    db.add(WebhookEvent(message_id=message_id, payload_hash=payload_hash))
+    await db.flush()
 
 
 # ------------------------- Layered entrypoint -------------------------
 
-async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[str, Any]:
+async def process_event(
+    *, payload: Dict[str, Any], db: AsyncSession, on_reply: Optional[OnReply] = None
+) -> Dict[str, Any]:
     """Layered webhook entrypoint.
 
     Responsibilities:
       - normalize payload
-      - determine event type
-      - call dispatcher
-
-    Note: handlers are responsible for sending WhatsApp replies.
+      - invoke the injected reply callback
+      - record successful event IDs for deduplication
     """
 
-    from .event_dispatcher import dispatch
-
-    logger.info(
-        "services/webhook_service: process_event called payload_type=%s keys=%s",
-        type(payload).__name__,
-        list(payload.keys()) if isinstance(payload, dict) else None,
-    )
-
-    logger.info(
-        "services/webhook_service: incoming payload received request_id=%s",
-        payload.get("entry") if isinstance(payload, dict) else None,
-    )
+    logger.info("services/webhook_service: process_event received")
 
     async def _default_on_reply(event: Dict[str, Any]) -> None:
-        logger.info("webhook callback invoked message_id=%s phone=%s", event.get("message_id"), event.get("phone"))
+        logger.info("webhook callback invoked message_type=%s", event.get("message_type"))
 
-    async def _invoke_on_reply(event: Dict[str, Any]) -> None:
-        callback = getattr(get_settings(), "on_reply_callback", None)
-        if callable(callback):
-            await callback(event)
-            return
-        await _default_on_reply(event)
+    callback = on_reply or _default_on_reply
 
     try:
         events = parse_whatsapp_webhook_payload(payload)
@@ -573,21 +539,10 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
             # Deduplicate by WhatsApp message_id only (true idempotency).
             # If a different webhook delivery arrives with a different message_id, it must NOT be ignored.
             payload_hash = hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
-            is_dup, _ = await _idempotency_check_or_insert(db, message_id=str(message_id), payload_hash=payload_hash)
-            if is_dup:
+            if await _is_processed(db, str(message_id)):
                 results.append({"status": "duplicate_ignored", "message_id": str(message_id)})
                 continue
-
-
-            # IMPORTANT: persist idempotency only AFTER successful processing.
-            # This ensures transient handler failures are retried instead of being
-            # silently dropped forever.
-
-
             timestamp = _utc_from_unix(ev.get("timestamp")) or datetime.now(tz=timezone.utc)
-
-            # Normalize/ensure dispatcher-compatible message_type.
-            # Dispatcher expects exactly: "message" | "button" | "interactive" | "status".
             raw_message_type = ev.get("message_type")
             msg_type = raw_message_type
             if msg_type is None:
@@ -598,7 +553,6 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
                 else:
                     msg_type = "message"
 
-            # Best-effort mapping if upstream uses different casing
             if isinstance(msg_type, str):
                 msg_type = msg_type.strip().lower()
 
@@ -610,18 +564,16 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
                 "button_title": ev.get("button_title"),
                 "button_payload": ev.get("button_payload"),
                 "button_id": ev.get("button_id"),
+                "reply_key": _reply_key(ev.get("button_title"), ev.get("button_payload")),
             }
-
-
-            res = await dispatch(event=normalized_event, db=db)
-            results.append(res)
-            await _invoke_on_reply(normalized_event)
-
-            # Only commit the idempotency row after the handler succeeds.
-            # If dispatch raised, we will hit the outer exception handler and
-            # the idempotency record will not be committed (so retries work).
             try:
+                await callback(normalized_event)
+                await _record_processed(db, message_id=str(message_id), payload_hash=payload_hash)
                 await db.commit()
+                results.append({"status": "ok", **normalized_event})
+            except IntegrityError:
+                await db.rollback()
+                results.append({"status": "duplicate_ignored", "message_id": str(message_id)})
             except SQLAlchemyError:
                 await db.rollback()
                 results.append({"status": "idempotency_commit_failed", "message_id": str(message_id)})
@@ -659,7 +611,6 @@ async def process_whatsapp_events(payload: Dict[str, Any], db: AsyncSession) -> 
                 button_title=item.get("button_title"),
                 button_payload=item.get("button_payload"),
                 button_id=item.get("button_id"),
-                candidate_id=item.get("candidate_id"),
                 detail=item.get("detail"),
             )
         )

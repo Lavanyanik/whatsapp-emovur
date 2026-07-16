@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import asyncio
 import httpx
 
@@ -138,9 +138,7 @@ async def _fetch_all_templates(timeout: int = 10) -> List[TemplateRecord]:
         logger.info("EMOVUR DRY RUN enabled — returning empty template cache")
         return []
 
-    redacted_headers = {k: ("<redacted>" if k.lower() == "api-key" else v) for k, v in headers.items()}
     logger.info("Fetching Emovur templates URL=%s", url)
-    logger.debug("Fetching Emovur templates headers=%s", redacted_headers)
 
     timeout_settings = httpx.Timeout(timeout, connect=timeout, read=timeout, write=timeout, pool=timeout)
     async with httpx.AsyncClient(timeout=timeout_settings) as client:
