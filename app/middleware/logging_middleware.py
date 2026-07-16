@@ -36,7 +36,6 @@ class LoggingMiddleware:
         request = Request(scope, receive=receive)
         start = time()
 
-        # Read and possibly mask small JSON request bodies
         body_text = ""
         downstream_receive = receive
         try:
@@ -56,15 +55,7 @@ class LoggingMiddleware:
                 request._receive = _receive  # type: ignore[attr-defined]
 
                 if body_bytes and len(body_bytes) < 8192:
-                    try:
-                        payload = json.loads(body_bytes.decode("utf-8"))
-                        # Mask phone if present at top-level
-                        if isinstance(payload, dict) and "phone" in payload:
-                            payload = dict(payload)
-                            payload["phone"] = mask_phone(str(payload.get("phone")))
-                        body_text = json.dumps(payload)
-                    except Exception:
-                        body_text = "<non-json or too large>"
+                    body_text = f"<body-bytes:{len(body_bytes)}>"
         except Exception:
             # Don't let logging errors block request processing
             logger.exception("Failed to read request body for logging")

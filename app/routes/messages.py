@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from ..config import get_settings
 from ..schemas import MessageRequest, MessageResponse
 from ..services.emovur_service import (
     EmovurError,
@@ -18,6 +19,22 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+settings = get_settings()
+
+
+def require_messages_auth(request: Request) -> None:
+    expected_token = getattr(settings, "messages_auth_token", None) or getattr(settings, "api_key", None)
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="server_misconfigured")
+
+    provided = request.headers.get("X-API-Key")
+    if not provided:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            provided = auth_header[len("Bearer "):].strip()
+
+    if provided != expected_token:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 @router.post(
@@ -27,7 +44,7 @@ router = APIRouter()
     summary="Send a WhatsApp message through Emovur",
     description="Generic capability-based endpoint for sending WhatsApp template, text, image, document, video, audio, and interactive messages via Emovur.",
 )
-async def send_message_route(payload: MessageRequest):
+async def send_message_route(payload: MessageRequest, _auth: None = Depends(require_messages_auth)):
     logger.info("/messages route entered payload=%s", payload)
 
     try:

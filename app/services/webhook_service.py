@@ -24,10 +24,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from ..models import Candidate, WebhookEvent
+from ..config import get_settings
+from ..models import WebhookEvent
 from ..utils.logger import get_logger
-
-from .candidate_service import map_button_to_status
 
 
 logger = get_logger(__name__)
@@ -538,14 +537,26 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
         list(payload.keys()) if isinstance(payload, dict) else None,
     )
 
-    logger.info("services/webhook_service: incoming payload=%s", payload)
+    logger.info(
+        "services/webhook_service: incoming payload received request_id=%s",
+        payload.get("entry") if isinstance(payload, dict) else None,
+    )
+
+    async def _default_on_reply(event: Dict[str, Any]) -> None:
+        logger.info("webhook callback invoked message_id=%s phone=%s", event.get("message_id"), event.get("phone"))
+
+    async def _invoke_on_reply(event: Dict[str, Any]) -> None:
+        callback = getattr(get_settings(), "on_reply_callback", None)
+        if callable(callback):
+            await callback(event)
+            return
+        await _default_on_reply(event)
 
     try:
         events = parse_whatsapp_webhook_payload(payload)
         logger.info(
-            "services/webhook_service: normalized events count=%s events=%s",
+            "services/webhook_service: normalized events count=%s",
             len(events) if events is not None else None,
-            events,
         )
 
 
@@ -568,13 +579,10 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
                 continue
 
 
-            # Persist idempotency record before handler runs so duplicates are skipped even on failure.
-            try:
-                await db.commit()
-            except SQLAlchemyError:
-                await db.rollback()
-                results.append({"status": "idempotency_commit_failed", "message_id": str(message_id)})
-                continue
+            # IMPORTANT: persist idempotency only AFTER successful processing.
+            # This ensures transient handler failures are retried instead of being
+            # silently dropped forever.
+
 
             timestamp = _utc_from_unix(ev.get("timestamp")) or datetime.now(tz=timezone.utc)
 
@@ -607,10 +615,22 @@ async def process_event(*, payload: Dict[str, Any], db: AsyncSession) -> Dict[st
 
             res = await dispatch(event=normalized_event, db=db)
             results.append(res)
+            await _invoke_on_reply(normalized_event)
+
+            # Only commit the idempotency row after the handler succeeds.
+            # If dispatch raised, we will hit the outer exception handler and
+            # the idempotency record will not be committed (so retries work).
+            try:
+                await db.commit()
+            except SQLAlchemyError:
+                await db.rollback()
+                results.append({"status": "idempotency_commit_failed", "message_id": str(message_id)})
+
 
         return {"status": "ok", "results": results}
 
     except Exception as exc:
+        await db.rollback()
         logger.exception("process_event fatal: %s", exc)
         return {"status": "fatal_error", "detail": str(exc)}
 

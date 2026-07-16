@@ -42,10 +42,12 @@ class Settings(BaseSettings):
     # Meta webhook verification settings
     verify_token: str | None = None
     whatsapp_app_secret: str | None = None
-    enable_webhook_signature_verification: bool = False
+    enable_webhook_signature_verification: bool = True
 
-
-
+    # Provider selection settings
+    whatsapp_provider: str | None = None
+    meta_api_url: str | None = None
+    messages_auth_token: str | None = None
 
     # Emovur client resiliency settings
     emovur_max_retries: int = 2
@@ -62,15 +64,15 @@ class Settings(BaseSettings):
     )
 
     def __repr_args__(self) -> "tuple[tuple[str, Any], ...]":
-        # Do not print API key in repr
+        # Do not print API key in repr and avoid referencing removed fields.
         return (
-            ("emovur_api_url", self.emovur_api_url),
-            ("phone_number_id", self.phone_number_id),
-            ("waba_id", self.waba_id),
-            ("followup_delay_hours", self.followup_delay_hours),
-            ("final_reminder_delay_hours", self.final_reminder_delay_hours),
-            ("log_level", self.log_level),
+            ("emovur_api_url", getattr(self, "emovur_api_url", None)),
+            ("phone_number_id", getattr(self, "phone_number_id", None)),
+            ("waba_id", getattr(self, "waba_id", None)),
+            ("whatsapp_provider", getattr(self, "whatsapp_provider", None)),
+            ("log_level", getattr(self, "log_level", None)),
         )
+
 
 
 

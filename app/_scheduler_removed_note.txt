@@ -1,2 +1,0 @@
-Scheduler/reminder code has been removed from runtime startup. This file exists only to document the change set during automated edits.
-

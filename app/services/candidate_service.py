@@ -53,12 +53,13 @@ def map_button_to_status(button_title: Optional[str], button_payload: Optional[s
         norm = _normalize_button_text(c)
         if not norm:
             continue
-        if "interested" in norm:
-            return RESPONSE_MAPPING["interested"]
         if "not" in norm and "interested" in norm:
             return RESPONSE_MAPPING["not interested"]
+        if norm == "interested" or norm.endswith("interested") or norm.startswith("interested"):
+            return RESPONSE_MAPPING["interested"]
         if "opt" in norm and "out" in norm:
             return RESPONSE_MAPPING["opt out"]
+
 
     return None, None
 

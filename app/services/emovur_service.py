@@ -15,6 +15,7 @@ import httpx
 from ..config import get_settings
 from ..constants import DEFAULT_LANGUAGE
 from ..utils.logger import get_logger
+from ..integrations.whatsapp import get_provider
 from .emovur_exceptions import (
     EmovurAuthError,
     EmovurError,
@@ -208,15 +209,8 @@ async def send_text(to: str, text: str, timeout: int = 10) -> Dict[str, Any]:
     if not text:
         raise ValueError("text must be provided")
 
-    body = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "text",
-        "text": {"preview_url": False, "body": text},
-    }
-
-    return await _post_payload(body, timeout=timeout)
+    provider = get_provider()
+    return await provider.send_text(to=to, text=text, timeout=timeout)
 
 
 async def send_media(

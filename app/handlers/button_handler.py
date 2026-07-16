@@ -6,7 +6,8 @@ from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..utils.logger import get_logger
-from ..services.candidate_service import update_candidate_response_from_button
+from .reply_handler import process_reply_event
+
 
 logger = get_logger(__name__)
 
@@ -31,15 +32,9 @@ async def process_button_reply_event(*, event: WebhookEvent, db: AsyncSession) -
         event.message_id,
     )
 
-    if not event.phone:
-        return {"status": "error_missing_phone"}
-
-    return await update_candidate_response_from_button(
+    return await process_reply_event(
+        event=event,
         db=db,
-        phone=str(event.phone),
-        message_id=str(event.message_id) if event.message_id else None,
-        button_title=event.button_title,
-        button_payload=event.button_payload,
-        timestamp=event.timestamp,
     )
+
 
