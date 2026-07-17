@@ -514,7 +514,12 @@ async def process_event(
     logger.info("services/webhook_service: process_event received")
 
     async def _default_on_reply(event: Dict[str, Any]) -> None:
+        # Routes call process_event without injecting a callback. Dispatch the
+        # normalized event here rather than stopping at a logging-only callback.
+        from .event_dispatcher import dispatch_event
+
         logger.info("webhook callback invoked message_type=%s", event.get("message_type"))
+        await dispatch_event(event=event, db=db)
 
     callback = on_reply or _default_on_reply
 

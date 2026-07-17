@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # Meta webhook verification settings
     verify_token: str | None = None
     whatsapp_app_secret: str | None = None
-    enable_webhook_signature_verification: bool = True
+    enable_webhook_signature_verification: bool = False
 
     # Provider selection settings
     whatsapp_provider: str | None = None

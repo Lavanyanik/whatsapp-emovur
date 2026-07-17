@@ -119,6 +119,68 @@ async def test_failed_callback_does_not_mark_event_processed():
     assert db.rollbacks == 1
 
 
+@pytest.mark.asyncio
+async def test_default_callback_dispatches_normalized_button_event(monkeypatch):
+    db = FakeDB()
+    dispatched = []
+
+    from app.services import event_dispatcher
+
+    async def fake_dispatch_event(*, event, db):
+        dispatched.append((event, db))
+        return {"status": "processed"}
+
+    monkeypatch.setattr(event_dispatcher, "dispatch_event", fake_dispatch_event)
+    payload = {
+        "messages": [
+            {
+                "id": "message-dispatch-1",
+                "from": "15551234567",
+                "type": "button",
+                "button": {"payload": "Interested", "text": "Interested"},
+            }
+        ]
+    }
+
+    result = await process_event(payload=payload, db=db)
+
+    assert result["results"][0]["status"] == "ok"
+    assert len(dispatched) == 1
+    event, dispatched_db = dispatched[0]
+    assert dispatched_db is db
+    assert event["message_type"] == "button"
+    assert event["reply_key"] == "interested"
+
+
+@pytest.mark.asyncio
+async def test_button_dispatch_reaches_candidate_response_service(monkeypatch):
+    from app.handlers import button_handler
+    from app.services.event_dispatcher import dispatch_event
+
+    calls = []
+
+    async def fake_update_candidate_response(**kwargs):
+        calls.append(kwargs)
+        return {"status": "processed"}
+
+    monkeypatch.setattr(button_handler, "update_candidate_response", fake_update_candidate_response)
+    result = await dispatch_event(
+        event={
+            "message_id": "message-handler-1",
+            "phone": "+15551234567",
+            "timestamp": None,
+            "message_type": "button",
+            "button_title": "Interested",
+            "button_payload": "Interested",
+        },
+        db=FakeDB(),
+    )
+
+    assert result == {"status": "processed"}
+    assert calls[0]["phone"] == "+15551234567"
+    assert calls[0]["button_payload"] == "Interested"
+
+
 def test_webhook_parser_normalizes_interactive_reply():
     payload = {
         "entry": [{"changes": [{"value": {"contacts": [{"wa_id": "15551234567"}], "messages": [{"id": "msg-1", "from": "15551234567", "timestamp": "1710000000", "type": "interactive", "interactive": {"button_reply": {"id": "btn-1", "title": "Interested"}}}]}}]}]
