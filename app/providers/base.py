@@ -114,3 +114,11 @@ class BaseCloudApiProvider:
             media["caption"] = caption
         body = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": media_type, media_type: media}
         return await self._post_payload(body, timeout)
+
+    async def fetch_templates(self, timeout: int = 10) -> list:
+        """Default implementation: returns an empty list.
+        
+        Providers that support template management override this.
+        """
+        return []
+

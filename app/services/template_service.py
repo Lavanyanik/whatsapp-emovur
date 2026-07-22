@@ -1,7 +1,7 @@
-"""Template discovery and caching for Emovur message templates.
+"""Template discovery and caching for WhatsApp message templates.
 
 Production requirements implemented:
-- Fetch templates using GET {{base-url}}/{{waba-id}}/message_templates with API key
+- Fetch templates using the configured provider's fetch_templates()
 - Persist essential template fields in memory
 - Find templates by display name (case-insensitive)
 - Auto-select if API returns a single approved template similar to requested name
@@ -16,15 +16,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 import asyncio
-import httpx
 
-from ..config import get_settings
+from ..providers.factory import ProviderFactory
 from ..utils.logger import get_logger
 
 
-
 logger = get_logger(__name__)
-settings = get_settings()
 
 
 @dataclass(frozen=True)
@@ -70,88 +67,22 @@ def _looks_similar(requested: str, candidate: str) -> bool:
     return compact(req) == compact(cand)
 
 
-def _extract_language_code(template_obj: Dict[str, Any]) -> str:
-    lang = template_obj.get("language")
-    if isinstance(lang, dict):
-        code = lang.get("code")
-        if code:
-            return str(code)
-    if isinstance(lang, str):
-        return lang
-    # Fallback: sometimes the API may return language_code directly
-    code = template_obj.get("language_code")
-    if code:
-        return str(code)
-    return ""
-
-
-def _parse_templates(payload: Any) -> List[TemplateRecord]:
-    # Emovur responses may return either a list or a dict with a list property.
-    raw_list: Any = payload
-    if isinstance(payload, dict):
-        for key in ("data", "templates", "message_templates", "results"):
-            if key in payload and isinstance(payload[key], list):
-                raw_list = payload[key]
-                break
-
-    if not isinstance(raw_list, list):
-        raise TemplateLookupError("Invalid templates payload")
-
-    records: List[TemplateRecord] = []
-    for t in raw_list:
-        if not isinstance(t, dict):
-            continue
-        tid = t.get("id") or t.get("template_id") or ""
-        name = t.get("name") or t.get("template_name") or ""
-        status = t.get("status") or ""
-        category = t.get("category")
-        components = t.get("components")
-        language = _extract_language_code(t)
-
-        if not tid or not name:
-            # Skip incomplete records
-            continue
-
-        records.append(
-            TemplateRecord(
-                id=str(tid),
-                name=str(name),
-                language=str(language),
-                status=str(status),
-                category=str(category) if category is not None else None,
-                components=components,
-            )
-        )
-
-    return records
+def _dict_to_template_record(t: Dict[str, Any]) -> TemplateRecord:
+    return TemplateRecord(
+        id=str(t.get("id") or ""),
+        name=str(t.get("name") or ""),
+        language=str(t.get("language") or ""),
+        status=str(t.get("status") or ""),
+        category=str(t["category"]) if t.get("category") is not None else None,
+        components=t.get("components"),
+    )
 
 
 async def _fetch_all_templates(timeout: int = 10) -> List[TemplateRecord]:
-    url = f"{settings.emovur_api_url.rstrip('/')}/{settings.waba_id}/message_templates"
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": settings.api_key,
-    }
-
-    if getattr(settings, "emovur_dry_run", False):
-        # No external network calls in dry-run; return empty set.
-        logger.info("EMOVUR DRY RUN enabled — returning empty template cache")
-        return []
-
-    logger.info("Fetching Emovur templates URL=%s", url)
-
-    timeout_settings = httpx.Timeout(timeout, connect=timeout, read=timeout, write=timeout, pool=timeout)
-    async with httpx.AsyncClient(timeout=timeout_settings) as client:
-        resp = await client.get(url, headers=headers)
-        try:
-            content = resp.json()
-        except Exception:
-            content = resp.text
-
-    if not (200 <= resp.status_code < 300):
-        raise TemplateLookupError(f"Failed to fetch templates: status={resp.status_code} body={content}")
-
-    return _parse_templates(content)
+    """Fetch templates from the configured provider."""
+    provider = ProviderFactory.create()
+    raw_templates = await provider.fetch_templates(timeout=timeout)
+    return [_dict_to_template_record(t) for t in raw_templates]
 
 
 async def refresh_templates_if_needed(force: bool = False) -> List[TemplateRecord]:

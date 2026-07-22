@@ -1,7 +1,8 @@
 import hmac
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Security, status
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 
 from ..config import get_settings
 from ..schemas import MessageRequest, MessageResponse
@@ -21,30 +22,55 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
-def require_messages_auth(request: Request) -> None:
+
+# ------------------------------------------------------------------
+# OpenAPI security scheme — enables the "Authorize" button in Swagger
+# ------------------------------------------------------------------
+_api_key_scheme = APIKeyHeader(
+    name="X-API-Key",
+    auto_error=False,
+    description="Messages API token from MESSAGES_AUTH_TOKEN or API_KEY env var",
+)
+
+
+def _check_token(api_key: str | None) -> None:
+    """Core authentication check — raise if *api_key* doesn't match the configured token."""
     settings = get_settings()
     expected_token = settings.messages_auth_token or settings.api_key
+    logger.debug("Auth check: api_key_present=%s", api_key is not None)
     if not expected_token:
         raise HTTPException(status_code=500, detail="server_misconfigured")
-
-    provided = request.headers.get("X-API-Key")
-    if not provided:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            provided = auth_header[len("Bearer "):].strip()
-
-    if not provided or not hmac.compare_digest(provided, expected_token):
+    if not api_key or not hmac.compare_digest(api_key, expected_token):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def require_messages_auth(
+    api_key: str | None = Security(_api_key_scheme),
+) -> None:
+    """FastAPI security dependency — validates ``X-API-Key`` header.
+
+    Using ``Security()`` (instead of ``Depends()``) registers this scheme in
+    OpenAPI so that Swagger UI shows an **Authorize** button where users can
+    paste their token.  The token is compared (constant-time) against
+    ``MESSAGES_AUTH_TOKEN``, falling back to ``API_KEY`` for backward
+    compatibility.
+    """
+    logger.debug("Auth dependency: api_key_present=%s", api_key is not None)
+    _check_token(api_key=api_key)
 
 
 @router.post(
     "/messages",
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Send a WhatsApp message through Emovur",
-    description="Generic capability-based endpoint for sending WhatsApp template, text, image, document, video, audio, and interactive messages via Emovur.",
+    summary="Send a WhatsApp message",
+    description="Send a WhatsApp template, text, image, document, video, audio, or interactive message.",
 )
-async def send_message_route(payload: MessageRequest, _auth: None = Depends(require_messages_auth)):
+async def send_message_route(
+    payload: MessageRequest,
+    _auth: None = Depends(require_messages_auth),
+):
+    logger.info("ENTER send_message_route")
     logger.info("Message send requested type=%s", payload.type)
 
     try:

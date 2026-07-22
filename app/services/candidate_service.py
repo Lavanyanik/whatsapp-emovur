@@ -14,23 +14,19 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_RESPONSE_MAPPING = {
-    "interested": ("interested", "Interested"),
+_RESPONSE_MAPPING: dict[str, tuple[str, str]] = {
     "not interested": ("not_interested", "Not Interested"),
-    "not-interested": ("not_interested", "Not Interested"),
-    "not_interested": ("not_interested", "Not Interested"),
     "opt out": ("opt_out", "Opt Out"),
-    "opt-out": ("opt_out", "Opt Out"),
-    "opt_out": ("opt_out", "Opt Out"),
+    "interested": ("interested", "Interested"),
 }
 
 
 def _map_button(button_title: Optional[str], button_payload: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     for value in (button_payload, button_title):
         key = " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
-        mapped = _RESPONSE_MAPPING.get(key)
-        if mapped:
-            return mapped
+        result = _RESPONSE_MAPPING.get(key)
+        if result is not None:
+            return result
     return None, None
 
 

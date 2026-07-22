@@ -28,10 +28,6 @@ settings = get_settings()
 logger = get_logger("app.main")
 
 
-
-
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting app, validating configuration")
@@ -44,16 +40,15 @@ async def lifespan(app: FastAPI):
         templates = await refresh_templates_if_needed(force=True)
         approved = [t for t in templates if str(t.status).lower() == "approved"]
         logger.info(
-            "Template cache warmed: total=%s approved=%s dry_run=%s",
+            "Template cache warmed: total=%s approved=%s provider=%s",
             len(templates),
             len(approved),
-            settings.emovur_dry_run,
+            settings.whatsapp_provider,
         )
         for t in approved:
             logger.info("Approved template: name=%s language=%s", t.name, t.language)
     except Exception:
         logger.warning("Template cache warm-up unavailable; continuing without cached templates")
-
 
 
 

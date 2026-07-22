@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 
 class WhatsAppProvider(Protocol):
@@ -35,3 +35,11 @@ class WhatsAppProvider(Protocol):
     async def send_interactive(
         self, *, to: str, interactive: Dict[str, Any], timeout: int = 10
     ) -> Dict[str, Any]: ...
+
+    async def fetch_templates(self, timeout: int = 10) -> List[Dict[str, Any]]:
+        """Fetch message templates from the provider.
+
+        Returns a list of template dicts with keys:
+          id, name, language, status, category, components
+        """
+        ...

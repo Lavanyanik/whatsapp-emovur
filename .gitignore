@@ -1,9 +1,42 @@
+# Environment
 .env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.venv/
 venv/
-.env.local
-.DS_Store
+env/
+
+# Database
+*.db
 *.sqlite
-whatsapp_emovur.db
+*.sqlite3
+
+# Testing
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+.tox/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Coverage
+.coverage.*
+
